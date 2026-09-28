@@ -4,3 +4,4 @@ Test/
 /tests/
 __pycache__/
 *.pyc
+/.codegraph/
