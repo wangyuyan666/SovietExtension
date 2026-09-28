@@ -1,8 +1,10 @@
 #import "YMAIWindowController.h"
 #import "YMAISettings.h"
 #import "YMAIService.h"
+#import "YMAIPromptStore.h"
 
 @interface YMAIWindowController : NSWindowController <NSWindowDelegate>
+@property(nonatomic, strong) NSPopUpButton *promptSelection;
 @property(nonatomic, strong) NSTextField *identity;
 @property(nonatomic, strong) NSTextField *destination;
 @property(nonatomic, strong) NSTextView *source;
@@ -97,7 +99,7 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label, CGFloat hei
         [content.leadingAnchor constraintEqualToAnchor:body.contentView.leadingAnchor],
         [content.topAnchor constraintEqualToAnchor:body.contentView.topAnchor]]];
     NSTextView *source, *analysis;
-    [content addArrangedSubview:[NSTextField labelWithString:@"本次上传：仅以下正文和你填写的补充要求"]];
+    [content addArrangedSubview:[NSTextField labelWithString:@"本次上传：以下正文、补充要求及所选话术"]];
     NSScrollView *sourceArea = YMAITextArea(&source, @"选中消息原文", 96);
     [content addArrangedSubview:sourceArea];
     [sourceArea.widthAnchor constraintEqualToAnchor:content.widthAnchor].active = YES;
@@ -123,6 +125,14 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label, CGFloat hei
         [views addObject:reply]; [buttons addObject:copy];
     }
     self.replyViews = views; self.replyCopyButtons = buttons;
+    self.promptSelection = [[NSPopUpButton alloc] init];
+    for (NSString *identifier in YMAIPromptIDs()) [self.promptSelection addItemWithTitle:YMAIPromptTitle(identifier)];
+    self.promptSelection.accessibilityLabel = @"本次话术";
+    self.promptSelection.target = self;
+    self.promptSelection.action = @selector(promptChanged:);
+    NSStackView *promptRow = [NSStackView stackViewWithViews:@[[NSTextField labelWithString:@"本次话术"], self.promptSelection]];
+    promptRow.spacing = 12;
+    [outer addArrangedSubview:promptRow];
     [outer addArrangedSubview:[NSTextField labelWithString:@"补充要求（可选）"]];
     self.requirements = [NSTextField textFieldWithString:@""];
     self.requirements.placeholderString = @"例如：委婉拒绝，不承诺具体时间";
@@ -150,6 +160,7 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label, CGFloat hei
 }
 - (void)setRunning:(BOOL)running {
     self.busy = running;
+    self.promptSelection.enabled = !running && !self.invalidAccount;
     self.generate.enabled = !running && !self.invalidAccount;
     self.cancelButton.enabled = running;
     self.requirements.enabled = !running && !self.invalidAccount;
@@ -199,6 +210,7 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label, CGFloat hei
     self.invalidAccount = NO;
     self.isCurrentAccount = account;
     self.message = text;
+    [self.promptSelection selectItemAtIndex:[YMAIPromptIDs() indexOfObject:YMAIPromptStore.sharedStore.selectedIdentifier]];
     self.source.string = text;
     self.requirements.stringValue = @"";
     self.identity.stringValue = [NSString stringWithFormat:@"会话：%@\n发送者：%@", session, sender];
@@ -210,9 +222,14 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label, CGFloat hei
     [NSRunLoop.mainRunLoop addTimer:self.accountTimer forMode:NSRunLoopCommonModes];
     [self generate:nil];
 }
+- (void)promptChanged:(id)sender {
+    [self cancel:nil]; [self clearResults];
+    self.status.stringValue = @"话术已切换，点击「重新分析」生成新建议。";
+}
 - (void)settings:(id)sender { YMAIShowSettings(); }
 - (void)settingsChanged:(NSNotification *)notification {
     [self cancel:nil]; [self clearResults];
+    [self.promptSelection selectItemAtIndex:[YMAIPromptIDs() indexOfObject:YMAIPromptStore.sharedStore.selectedIdentifier]];
     self.status.stringValue = @"AI 设置已变更。请点击「重新分析」，确认新的上传目标。";
     [self updateDestination];
 }
@@ -229,11 +246,13 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label, CGFloat hei
 - (void)generate:(id)sender {
     if (self.busy || ![self checkAccount]) return;
     [self updateDestination];
-    NSDictionary *settings = YMAILoadSettings();
+    NSMutableDictionary *settings = [YMAILoadSettings() mutableCopy];
+    settings[@"prompts"] = YMAIPromptStore.sharedStore.prompts;
+    settings[@"promptIdentifier"] = YMAIPromptIDs()[self.promptSelection.indexOfSelectedItem];
     NSError *error = nil;
     NSURL *endpoint = YMAIEndpoint(settings[@"provider"], settings[@"baseURL"], &error);
     if (!endpoint) { self.status.stringValue = error.localizedDescription; return; }
-    if (!YMAIRequestBody(settings[@"provider"], settings[@"model"], settings[@"style"], self.message,
+    if (!YMAIRequestBody(settings[@"provider"], settings[@"model"], settings[@"prompts"], settings[@"promptIdentifier"], self.message,
                         self.requirements.stringValue, &error)) { self.status.stringValue = error.localizedDescription; return; }
     NSString *consent = YMAICredentialScope(settings[@"provider"], settings[@"baseURL"], NULL);
     NSUInteger token = ++self.generation;
@@ -242,7 +261,7 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label, CGFloat hei
         self.status.stringValue = @"等待上传确认，尚未发送请求。";
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"允许向以下自定义地址发送聊天正文和 API 凭据？";
-        alert.informativeText = [NSString stringWithFormat:@"接口协议：%@\n目标地址：%@\n仅提交窗口中的正文和补充要求，不读取其他聊天。内容可能包含私人信息，保留政策以目标服务为准。\n确认后，后续主动点击「AI 分析」或「重新分析」将提交内容。切换配置会重新确认。",
+        alert.informativeText = [NSString stringWithFormat:@"接口协议：%@\n目标地址：%@\n提交窗口中的正文、补充要求及公共和所选场景话术，不读取其他聊天。内容可能包含私人信息，保留政策以目标服务为准。\n确认后，后续主动点击「AI 分析」或「重新分析」将提交内容。切换配置会重新确认。",
             YMAIProviderName(settings[@"provider"]), endpoint.absoluteString];
         [alert addButtonWithTitle:@"同意并分析"]; [alert addButtonWithTitle:@"取消"];
         [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
@@ -266,7 +285,8 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label, CGFloat hei
     self.status.stringValue = @"正在分析，可取消。关闭窗口会停止等待；已上传的内容无法撤回。";
     self.request = [[YMAIRequest alloc] init];
     __weak typeof(self) weakSelf = self;
-    [self.request startProvider:settings[@"provider"] baseURL:settings[@"baseURL"] model:settings[@"model"] key:key style:settings[@"style"]
+    [self.request startProvider:settings[@"provider"] baseURL:settings[@"baseURL"] model:settings[@"model"] key:key
+        prompts:settings[@"prompts"] promptIdentifier:settings[@"promptIdentifier"]
         text:self.message requirements:self.requirements.stringValue configuration:NSURLSessionConfiguration.ephemeralSessionConfiguration
         completion:^(NSDictionary *result, NSError *requestError) {
             typeof(self) self = weakSelf;

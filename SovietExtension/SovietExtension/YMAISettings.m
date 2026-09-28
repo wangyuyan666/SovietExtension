@@ -1,5 +1,6 @@
 #import "YMAISettings.h"
 #import "YMAIService.h"
+#import "YMAIPromptStore.h"
 #import <Security/Security.h>
 
 NSString * const YMAISettingsChangedNotification = @"YMAISettingsChangedNotification";
@@ -12,10 +13,9 @@ NSDictionary<NSString *, NSString *> *YMAILoadSettings(void) {
     // Read-only, idempotent migration of the active legacy configuration. Keep archived maps
     // and Keychain records untouched; saving explicitly commits the new protocol identifier.
     if ([@[@"deepseek", @"zhipu"] containsObject:saved[@"provider"]]) provider = @"openai-compatible";
-    NSString *style = [@[@"自然", @"简洁", @"正式"] containsObject:saved[@"style"]] ? saved[@"style"] : @"自然";
     NSString *model = [saved[@"model"] isKindOfClass:NSString.class] ? saved[@"model"] : @"";
     NSString *baseURL = [saved[@"baseURL"] isKindOfClass:NSString.class] ? saved[@"baseURL"] : @"";
-    return @{@"provider": provider, @"style": style, @"model": model, @"baseURL": baseURL};
+    return @{@"provider": provider, @"model": model, @"baseURL": baseURL};
 }
 NSString *YMAICredentialScope(NSString *provider, NSString *baseURL, NSError **error) {
     if (!YMAIEndpoint(provider, baseURL, error)) return nil;
@@ -69,9 +69,131 @@ BOOL YMAIWriteKey(NSString *provider, NSString *baseURL, NSString *key, NSError 
     return status == errSecSuccess;
 }
 
+// Independent draft: switching templates preserves edits; closing without saving discards them.
+@interface YMAIPromptController : NSWindowController <NSWindowDelegate>
+@property(nonatomic, strong) NSPopUpButton *selection;
+@property(nonatomic, strong) NSPopUpButton *defaultSelection;
+@property(nonatomic, strong) NSTextView *editor;
+@property(nonatomic, strong) NSTextField *status;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *draft;
+@property(nonatomic, copy) NSString *editingIdentifier;
+@end
+
+@implementation YMAIPromptController
+- (instancetype)init {
+    NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 660, 580)
+        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
+        backing:NSBackingStoreBuffered defer:NO];
+    self = [super initWithWindow:window];
+    if (!self) return nil;
+    window.title = @"AI 话术管理";
+    window.releasedWhenClosed = NO;
+    window.minSize = NSMakeSize(580, 460);
+    [window center];
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.alignment = NSLayoutAttributeLeading;
+    stack.spacing = 12;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [window.contentView addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.leadingAnchor constraintEqualToAnchor:window.contentView.leadingAnchor constant:20],
+        [stack.trailingAnchor constraintEqualToAnchor:window.contentView.trailingAnchor constant:-20],
+        [stack.topAnchor constraintEqualToAnchor:window.contentView.topAnchor constant:20],
+        [stack.bottomAnchor constraintEqualToAnchor:window.contentView.bottomAnchor constant:-20]]];
+    NSTextField *intro = [NSTextField wrappingLabelWithString:
+        @"话术会随正文一起提交给 AI。仅调整内容和语气；JSON 格式、仅使用已提供文本及不自动发送等固定约束不可修改。保存后下次分析生效；关闭不保存会放弃修改。"];
+    [stack addArrangedSubview:intro];
+    [intro.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
+    self.defaultSelection = [[NSPopUpButton alloc] init];
+    self.selection = [[NSPopUpButton alloc] init];
+    [self.selection addItemWithTitle:@"公共提示词"];
+    for (NSString *identifier in YMAIPromptIDs()) {
+        [self.selection addItemWithTitle:YMAIPromptTitle(identifier)];
+        [self.defaultSelection addItemWithTitle:YMAIPromptTitle(identifier)];
+    }
+    self.selection.accessibilityLabel = @"编辑话术";
+    self.defaultSelection.accessibilityLabel = @"默认话术";
+    self.selection.target = self;
+    self.selection.action = @selector(selectionChanged:);
+    for (NSArray *pair in @[@[@"默认话术", self.defaultSelection], @[@"编辑话术", self.selection]]) {
+        NSStackView *row = [NSStackView stackViewWithViews:@[[NSTextField labelWithString:pair[0]], pair[1]]];
+        row.spacing = 12;
+        [stack addArrangedSubview:row];
+    }
+    NSScrollView *scroll = [[NSScrollView alloc] init];
+    scroll.hasVerticalScroller = YES;
+    scroll.borderType = NSBezelBorder;
+    self.editor = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 620, 300)];
+    self.editor.richText = NO;
+    self.editor.font = [NSFont systemFontOfSize:13];
+    self.editor.textColor = NSColor.textColor;
+    self.editor.backgroundColor = NSColor.textBackgroundColor;
+    self.editor.textContainerInset = NSMakeSize(10, 8);
+    self.editor.autoresizingMask = NSViewWidthSizable;
+    self.editor.verticallyResizable = YES;
+    self.editor.horizontallyResizable = NO;
+    self.editor.textContainer.widthTracksTextView = YES;
+    self.editor.textContainer.containerSize = NSMakeSize(620, CGFLOAT_MAX);
+    self.editor.accessibilityLabel = @"提示词正文";
+    self.editor.allowsUndo = YES;
+    scroll.documentView = self.editor;
+    [stack addArrangedSubview:scroll];
+    [scroll.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
+    [scroll.heightAnchor constraintGreaterThanOrEqualToConstant:180].active = YES;
+    self.status = [NSTextField wrappingLabelWithString:@""];
+    self.status.accessibilityLabel = @"话术保存状态";
+    [stack addArrangedSubview:self.status];
+    [self.status.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
+    NSStackView *buttons = [NSStackView stackViewWithViews:@[
+        [NSButton buttonWithTitle:@"恢复当前默认" target:self action:@selector(restore:)],
+        [NSButton buttonWithTitle:@"取消" target:self action:@selector(cancel:)],
+        [NSButton buttonWithTitle:@"保存话术" target:self action:@selector(save:)]]];
+    buttons.spacing = 12;
+    [stack addArrangedSubview:buttons];
+    return self;
+}
+- (void)reload {
+    self.draft = [YMAIPromptStore.sharedStore.prompts mutableCopy];
+    [self.defaultSelection selectItemAtIndex:[YMAIPromptIDs() indexOfObject:YMAIPromptStore.sharedStore.selectedIdentifier]];
+    [self.selection selectItemAtIndex:0];
+    self.editingIdentifier = @"common";
+    [self loadEditor];
+    self.status.stringValue = @"每段限 12000 字符。公共提示词应用于全部场景。";
+}
+- (void)loadEditor {
+    self.editor.string = self.draft[self.editingIdentifier];
+    [self.editor.undoManager removeAllActions];
+    [self.editor scrollRangeToVisible:NSMakeRange(0, 0)];
+}
+- (void)selectionChanged:(id)sender {
+    self.draft[self.editingIdentifier] = [self.editor.string copy];
+    NSInteger index = self.selection.indexOfSelectedItem;
+    self.editingIdentifier = index == 0 ? @"common" : YMAIPromptIDs()[index - 1];
+    [self loadEditor];
+}
+- (void)restore:(id)sender {
+    self.draft[self.editingIdentifier] = YMAIDefaultPrompts()[self.editingIdentifier];
+    [self loadEditor];
+    self.status.stringValue = @"当前话术已恢复默认，点击「保存话术」后生效。";
+}
+- (void)cancel:(id)sender { [self.window close]; }
+- (void)save:(id)sender {
+    self.draft[self.editingIdentifier] = [self.editor.string copy];
+    NSError *error = nil;
+    if (![YMAIPromptStore.sharedStore savePrompts:self.draft
+        selectedIdentifier:YMAIPromptIDs()[self.defaultSelection.indexOfSelectedItem] error:&error]) {
+        self.status.stringValue = error.localizedDescription;
+        return;
+    }
+    self.status.stringValue = @"已保存，下次分析生效；自定义内容不会被插件更新覆盖。";
+    [NSNotificationCenter.defaultCenter postNotificationName:YMAISettingsChangedNotification object:nil];
+}
+@end
+
 @interface YMAISettingsController : NSWindowController <NSWindowDelegate, NSTextFieldDelegate>
+@property(nonatomic, strong) YMAIPromptController *promptController;
 @property(nonatomic, strong) NSPopUpButton *provider;
-@property(nonatomic, strong) NSPopUpButton *style;
 @property(nonatomic, strong) NSTextField *model;
 @property(nonatomic, strong) NSTextField *baseURL;
 @property(nonatomic, strong) NSSecureTextField *key;
@@ -115,10 +237,8 @@ BOOL YMAIWriteKey(NSString *provider, NSString *baseURL, NSString *key, NSError 
     self.model.placeholderString = @"填写此账户可用、支持 JSON 输出的文本模型 ID";
     self.key = [[NSSecureTextField alloc] init];
     self.key.placeholderString = @"留空只保留当前地址的密钥；新地址需填写";
-    self.style = [[NSPopUpButton alloc] init];
-    [self.style addItemsWithTitles:@[@"自然", @"简洁", @"正式"]];
-    NSArray *controls = @[self.provider, self.baseURL, self.model, self.key, self.style];
-    NSArray *labels = @[@"接口协议", @"Base URL", @"模型 ID", @"API Key", @"回复风格"];
+    NSArray *controls = @[self.provider, self.baseURL, self.model, self.key];
+    NSArray *labels = @[@"接口协议", @"Base URL", @"模型 ID", @"API Key"];
     for (NSUInteger i = 0; i < controls.count; i++) {
         NSView *control = controls[i];
         control.accessibilityLabel = labels[i];
@@ -145,7 +265,8 @@ BOOL YMAIWriteKey(NSString *provider, NSString *baseURL, NSString *key, NSError 
     [self.status.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
     NSButton *save = [NSButton buttonWithTitle:@"保存" target:self action:@selector(save:)];
     NSButton *remove = [NSButton buttonWithTitle:@"删除当前地址密钥…" target:self action:@selector(removeKey:)];
-    NSStackView *buttons = [NSStackView stackViewWithViews:@[remove, save]];
+    NSButton *prompts = [NSButton buttonWithTitle:@"话术管理…" target:self action:@selector(managePrompts:)];
+    NSStackView *buttons = [NSStackView stackViewWithViews:@[prompts, remove, save]];
     buttons.spacing = 16;
     [stack addArrangedSubview:buttons];
     return self;
@@ -158,9 +279,14 @@ BOOL YMAIWriteKey(NSString *provider, NSString *baseURL, NSString *key, NSError 
     self.baseURLs[settings[@"provider"]] = settings[@"baseURL"];
     self.editingProvider = settings[@"provider"];
     [self.provider selectItemAtIndex:[YMAIProviderIDs() indexOfObject:self.editingProvider]];
-    [self.style selectItemWithTitle:settings[@"style"]];
     [self loadProvider];
     self.status.stringValue = @"密钥按接口协议和地址隔离。旧厂商配置迁移后需重新填写密钥。";
+}
+- (void)managePrompts:(id)sender {
+    if (!self.promptController) self.promptController = [[YMAIPromptController alloc] init];
+    if (!self.promptController.window.visible) [self.promptController reload];
+    [self.promptController showWindow:nil];
+    [self.promptController.window makeKeyAndOrderFront:nil];
 }
 - (void)loadProvider {
     id model = self.models[self.editingProvider];
@@ -196,7 +322,6 @@ BOOL YMAIWriteKey(NSString *provider, NSString *baseURL, NSString *key, NSError 
     NSString *base = YMAINormalizeBaseURL(self.baseURL.stringValue, &error);
     if (!base) { self.status.stringValue = error.localizedDescription; return; }
     NSString *provider = [self.editingProvider copy];
-    NSString *style = self.style.titleOfSelectedItem;
     NSString *model = [self.model.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     if (!model.length || model.length > 128) { self.status.stringValue = @"请填写有效的模型 ID（不超过 128 字符）。"; return; }
     // Only the selected provider's key is written, so a failed save has no partial multi-key transaction.
@@ -208,7 +333,7 @@ BOOL YMAIWriteKey(NSString *provider, NSString *baseURL, NSString *key, NSError 
     [NSUserDefaults.standardUserDefaults setObject:self.models forKey:@"YMAI.Models.SOVIET"];
     [NSUserDefaults.standardUserDefaults setObject:self.baseURLs forKey:@"YMAI.BaseURLs.SOVIET"];
     [NSUserDefaults.standardUserDefaults setObject:@{@"provider": provider, @"model": model,
-        @"style": style, @"baseURL": base} forKey:YMAIPreferencesKey];
+        @"baseURL": base} forKey:YMAIPreferencesKey];
     [NSUserDefaults.standardUserDefaults removeObjectForKey:@"YMAI.Consent.SOVIET"];
     self.key.stringValue = @"";
     self.baseURL.stringValue = base;
