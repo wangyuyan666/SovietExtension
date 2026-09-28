@@ -1,0 +1,306 @@
+#import "YMAIWindowController.h"
+#import "YMAISettings.h"
+#import "YMAIService.h"
+
+@interface YMAIWindowController : NSWindowController <NSWindowDelegate>
+@property(nonatomic, strong) NSTextField *identity;
+@property(nonatomic, strong) NSTextField *destination;
+@property(nonatomic, strong) NSTextView *source;
+@property(nonatomic, strong) NSTextView *analysis;
+@property(nonatomic, strong) NSTextField *requirements;
+@property(nonatomic, strong) NSTextField *status;
+@property(nonatomic, strong) NSButton *generate;
+@property(nonatomic, strong) NSButton *cancelButton;
+@property(nonatomic, strong) NSProgressIndicator *spinner;
+@property(nonatomic, strong) NSArray<NSTextView *> *replyViews;
+@property(nonatomic, strong) NSArray<NSButton *> *replyCopyButtons;
+@property(nonatomic, copy) NSString *message;
+@property(nonatomic, copy) BOOL (^isCurrentAccount)(void);
+@property(nonatomic, strong) YMAIRequest *request;
+@property(nonatomic, strong) NSTimer *accountTimer;
+@property(nonatomic) NSUInteger generation;
+@property(nonatomic) BOOL busy;
+@property(nonatomic) BOOL invalidAccount;
+@end
+
+static NSScrollView *YMAITextArea(NSTextView **out, NSString *label, CGFloat height) {
+    NSScrollView *scroll = [[NSScrollView alloc] init];
+    scroll.hasVerticalScroller = YES;
+    scroll.borderType = NSBezelBorder;
+    NSTextView *view = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 520, height)];
+    view.editable = NO;
+    view.selectable = YES;
+    view.richText = NO;
+    view.font = [NSFont systemFontOfSize:13];
+    view.textColor = NSColor.textColor;
+    view.backgroundColor = NSColor.textBackgroundColor;
+    view.textContainerInset = NSMakeSize(10, 8);
+    view.autoresizingMask = NSViewWidthSizable;
+    view.verticallyResizable = YES;
+    view.horizontallyResizable = NO;
+    view.textContainer.widthTracksTextView = YES;
+    view.textContainer.containerSize = NSMakeSize(520, CGFLOAT_MAX);
+    view.accessibilityLabel = label;
+    scroll.documentView = view;
+    [scroll.heightAnchor constraintEqualToConstant:height].active = YES;
+    *out = view;
+    return scroll;
+}
+
+@implementation YMAIWindowController
+- (instancetype)init {
+    NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 600, 820)
+        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
+        backing:NSBackingStoreBuffered defer:NO];
+    self = [super initWithWindow:window];
+    if (!self) return nil;
+    window.title = @"AI 分析";
+    window.releasedWhenClosed = NO;
+    window.minSize = NSMakeSize(520, 620);
+    window.delegate = self;
+    [window center];
+    NSStackView *outer = [[NSStackView alloc] init];
+    outer.orientation = NSUserInterfaceLayoutOrientationVertical;
+    outer.alignment = NSLayoutAttributeLeading;
+    outer.spacing = 12;
+    outer.translatesAutoresizingMaskIntoConstraints = NO;
+    [window.contentView addSubview:outer];
+    [NSLayoutConstraint activateConstraints:@[
+        [outer.topAnchor constraintEqualToAnchor:window.contentView.topAnchor constant:20],
+        [outer.bottomAnchor constraintEqualToAnchor:window.contentView.bottomAnchor constant:-20],
+        [outer.leadingAnchor constraintEqualToAnchor:window.contentView.leadingAnchor constant:20],
+        [outer.trailingAnchor constraintEqualToAnchor:window.contentView.trailingAnchor constant:-20]]];
+    self.identity = [NSTextField wrappingLabelWithString:@"分析对象"];
+    self.identity.font = [NSFont boldSystemFontOfSize:14];
+    [outer addArrangedSubview:self.identity];
+    [self.identity.widthAnchor constraintEqualToAnchor:outer.widthAnchor].active = YES;
+    self.destination = [NSTextField wrappingLabelWithString:@""];
+    self.destination.font = [NSFont systemFontOfSize:12];
+    self.destination.textColor = NSColor.secondaryLabelColor;
+    [outer addArrangedSubview:self.destination];
+    [self.destination.widthAnchor constraintEqualToAnchor:outer.widthAnchor].active = YES;
+
+    NSScrollView *body = [[NSScrollView alloc] init];
+    body.hasVerticalScroller = YES;
+    body.drawsBackground = NO;
+    [outer addArrangedSubview:body];
+    [body.widthAnchor constraintEqualToAnchor:outer.widthAnchor].active = YES;
+    [body.heightAnchor constraintGreaterThanOrEqualToConstant:280].active = YES;
+    NSStackView *content = [[NSStackView alloc] init];
+    content.orientation = NSUserInterfaceLayoutOrientationVertical;
+    content.alignment = NSLayoutAttributeLeading;
+    content.spacing = 10;
+    content.translatesAutoresizingMaskIntoConstraints = NO;
+    body.documentView = content;
+    [NSLayoutConstraint activateConstraints:@[
+        [content.widthAnchor constraintEqualToAnchor:body.contentView.widthAnchor],
+        [content.leadingAnchor constraintEqualToAnchor:body.contentView.leadingAnchor],
+        [content.topAnchor constraintEqualToAnchor:body.contentView.topAnchor]]];
+    NSTextView *source, *analysis;
+    [content addArrangedSubview:[NSTextField labelWithString:@"本次上传：仅以下正文和你填写的补充要求"]];
+    NSScrollView *sourceArea = YMAITextArea(&source, @"选中消息原文", 96);
+    [content addArrangedSubview:sourceArea];
+    [sourceArea.widthAnchor constraintEqualToAnchor:content.widthAnchor].active = YES;
+    self.source = source;
+    [content addArrangedSubview:[NSTextField labelWithString:@"分析 · 上下文仅限这条消息"]];
+    NSScrollView *analysisArea = YMAITextArea(&analysis, @"分析结果", 88);
+    [content addArrangedSubview:analysisArea];
+    [analysisArea.widthAnchor constraintEqualToAnchor:content.widthAnchor].active = YES;
+    self.analysis = analysis;
+    NSMutableArray *views = [NSMutableArray array], *buttons = [NSMutableArray array];
+    for (NSInteger i = 0; i < 3; i++) {
+        NSTextField *title = [NSTextField labelWithString:[NSString stringWithFormat:@"回复建议 %ld", (long)i + 1]];
+        NSButton *copy = [NSButton buttonWithTitle:@"复制" target:self action:@selector(copyReply:)];
+        copy.tag = i; copy.enabled = NO;
+        copy.accessibilityLabel = [NSString stringWithFormat:@"复制回复建议 %ld", (long)i + 1];
+        NSStackView *row = [NSStackView stackViewWithViews:@[title, copy]];
+        row.spacing = 16;
+        [content addArrangedSubview:row];
+        NSTextView *reply;
+        NSScrollView *area = YMAITextArea(&reply, title.stringValue, 88);
+        [content addArrangedSubview:area];
+        [area.widthAnchor constraintEqualToAnchor:content.widthAnchor].active = YES;
+        [views addObject:reply]; [buttons addObject:copy];
+    }
+    self.replyViews = views; self.replyCopyButtons = buttons;
+    [outer addArrangedSubview:[NSTextField labelWithString:@"补充要求（可选）"]];
+    self.requirements = [NSTextField textFieldWithString:@""];
+    self.requirements.placeholderString = @"例如：委婉拒绝，不承诺具体时间";
+    self.requirements.accessibilityLabel = @"补充要求";
+    [outer addArrangedSubview:self.requirements];
+    [self.requirements.widthAnchor constraintEqualToAnchor:outer.widthAnchor].active = YES;
+    self.status = [NSTextField wrappingLabelWithString:@"AI 建议可能有误，请核对后使用；不会自动发送。"];
+    self.status.font = [NSFont systemFontOfSize:12];
+    [outer addArrangedSubview:self.status];
+    [self.status.widthAnchor constraintEqualToAnchor:outer.widthAnchor].active = YES;
+    self.spinner = [[NSProgressIndicator alloc] init];
+    self.spinner.style = NSProgressIndicatorStyleSpinning;
+    self.spinner.controlSize = NSControlSizeSmall;
+    self.spinner.displayedWhenStopped = NO;
+    self.generate = [NSButton buttonWithTitle:@"重新分析" target:self action:@selector(generate:)];
+    self.cancelButton = [NSButton buttonWithTitle:@"取消" target:self action:@selector(cancel:)];
+    self.cancelButton.enabled = NO;
+    NSButton *settings = [NSButton buttonWithTitle:@"AI 设置…" target:self action:@selector(settings:)];
+    NSStackView *actions = [NSStackView stackViewWithViews:@[settings, self.spinner, self.cancelButton, self.generate]];
+    actions.spacing = 12;
+    [outer addArrangedSubview:actions];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(settingsChanged:)
+                                              name:YMAISettingsChangedNotification object:nil];
+    return self;
+}
+- (void)setRunning:(BOOL)running {
+    self.busy = running;
+    self.generate.enabled = !running && !self.invalidAccount;
+    self.cancelButton.enabled = running;
+    self.requirements.enabled = !running && !self.invalidAccount;
+    if (running) [self.spinner startAnimation:nil]; else [self.spinner stopAnimation:nil];
+}
+- (void)clearResults {
+    self.analysis.string = @"";
+    for (NSTextView *view in self.replyViews) view.string = @"";
+    for (NSButton *button in self.replyCopyButtons) button.enabled = NO;
+}
+- (void)cancel:(id)sender {
+    self.generation++;
+    [self.request cancel]; self.request = nil;
+    if (self.window.attachedSheet) [self.window endSheet:self.window.attachedSheet returnCode:NSModalResponseCancel];
+    [self setRunning:NO];
+    self.status.stringValue = @"已取消；没有发送回复。";
+}
+- (BOOL)checkAccount {
+    if (self.invalidAccount) return NO;
+    if (!self.isCurrentAccount || !self.isCurrentAccount()) {
+        self.invalidAccount = YES;
+        [self cancel:nil]; [self clearResults];
+        self.message = nil; self.source.string = @"";
+        self.requirements.stringValue = @"";
+        self.status.stringValue = @"账号已变化或无法确认，已清除内容。请重新右键选择消息。";
+        return NO;
+    }
+    return YES;
+}
+- (void)presentText:(NSString *)text session:(NSString *)session sender:(NSString *)sender
+           account:(BOOL (^)(void))account {
+    if (self.window.visible && self.requirements.stringValue.length) {
+        if (self.window.attachedSheet) { [self.window makeKeyAndOrderFront:nil]; return; }
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"切换分析消息？";
+        alert.informativeText = @"当前补充要求和分析结果将被清除。";
+        [alert addButtonWithTitle:@"切换"]; [alert addButtonWithTitle:@"保留当前"];
+        [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
+            if (result == NSAlertFirstButtonReturn) {
+                self.requirements.stringValue = @"";
+                [self presentText:text session:session sender:sender account:account];
+            }
+        }];
+        return;
+    }
+    [self cancel:nil]; [self clearResults];
+    self.invalidAccount = NO;
+    self.isCurrentAccount = account;
+    self.message = text;
+    self.source.string = text;
+    self.requirements.stringValue = @"";
+    self.identity.stringValue = [NSString stringWithFormat:@"会话：%@\n发送者：%@", session, sender];
+    [self setRunning:NO];
+    [self showWindow:nil]; [self.window makeKeyAndOrderFront:nil];
+    [self.accountTimer invalidate];
+    __weak typeof(self) weakSelf = self;
+    self.accountTimer = [NSTimer timerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) { [weakSelf checkAccount]; }];
+    [NSRunLoop.mainRunLoop addTimer:self.accountTimer forMode:NSRunLoopCommonModes];
+    [self generate:nil];
+}
+- (void)settings:(id)sender { YMAIShowSettings(); }
+- (void)settingsChanged:(NSNotification *)notification {
+    [self cancel:nil]; [self clearResults];
+    self.status.stringValue = @"AI 设置已变更。请点击「重新分析」，确认新的上传目标。";
+    [self updateDestination];
+}
+- (void)updateDestination {
+    NSDictionary *settings = YMAILoadSettings();
+    NSURL *endpoint = YMAIEndpoint(settings[@"provider"], settings[@"baseURL"], NULL);
+    self.destination.stringValue = [NSString stringWithFormat:@"%@ · %@\n%@ · 不额外上传会话及账号标识",
+        YMAIProviderName(settings[@"provider"]), [settings[@"model"] length] ? settings[@"model"] : @"尚未配置模型",
+        endpoint.absoluteString ?: @"请先填写有效的 Base URL"];
+    self.destination.toolTip = endpoint.absoluteString;
+    self.destination.maximumNumberOfLines = 3;
+    self.destination.lineBreakMode = NSLineBreakByTruncatingMiddle;
+}
+- (void)generate:(id)sender {
+    if (self.busy || ![self checkAccount]) return;
+    [self updateDestination];
+    NSDictionary *settings = YMAILoadSettings();
+    NSError *error = nil;
+    NSURL *endpoint = YMAIEndpoint(settings[@"provider"], settings[@"baseURL"], &error);
+    if (!endpoint) { self.status.stringValue = error.localizedDescription; return; }
+    if (!YMAIRequestBody(settings[@"provider"], settings[@"model"], settings[@"style"], self.message,
+                        self.requirements.stringValue, &error)) { self.status.stringValue = error.localizedDescription; return; }
+    NSString *consent = YMAICredentialScope(settings[@"provider"], settings[@"baseURL"], NULL);
+    NSUInteger token = ++self.generation;
+    if (![[NSUserDefaults.standardUserDefaults stringForKey:@"YMAI.Consent.SOVIET"] isEqual:consent]) {
+        [self setRunning:YES];
+        self.status.stringValue = @"等待上传确认，尚未发送请求。";
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"允许向以下自定义地址发送聊天正文和 API 凭据？";
+        alert.informativeText = [NSString stringWithFormat:@"接口协议：%@\n目标地址：%@\n仅提交窗口中的正文和补充要求，不读取其他聊天。内容可能包含私人信息，保留政策以目标服务为准。\n确认后，后续主动点击「AI 分析」或「重新分析」将提交内容。切换配置会重新确认。",
+            YMAIProviderName(settings[@"provider"]), endpoint.absoluteString];
+        [alert addButtonWithTitle:@"同意并分析"]; [alert addButtonWithTitle:@"取消"];
+        [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
+            if (token != self.generation) return;
+            [self setRunning:NO];
+            if (result != NSAlertFirstButtonReturn) { self.status.stringValue = @"已取消上传。"; return; }
+            if (![self checkAccount]) return;
+            [NSUserDefaults.standardUserDefaults setObject:consent forKey:@"YMAI.Consent.SOVIET"];
+            [self submit:settings token:token];
+        }];
+    } else [self submit:settings token:token];
+}
+- (void)submit:(NSDictionary *)settings token:(NSUInteger)token {
+    if (![self checkAccount]) return;
+    NSError *error = nil;
+    NSString *key = YMAIReadKey(settings[@"provider"], settings[@"baseURL"], &error);
+    // Keychain may present a permission dialog and run a nested event loop.
+    if (token != self.generation || !self.window.visible || ![self checkAccount]) return;
+    if (!key.length) { self.status.stringValue = error.localizedDescription ?: @"请先在 AI 设置中保存 API Key。"; return; }
+    [self clearResults]; [self setRunning:YES];
+    self.status.stringValue = @"正在分析，可取消。关闭窗口会停止等待；已上传的内容无法撤回。";
+    self.request = [[YMAIRequest alloc] init];
+    __weak typeof(self) weakSelf = self;
+    [self.request startProvider:settings[@"provider"] baseURL:settings[@"baseURL"] model:settings[@"model"] key:key style:settings[@"style"]
+        text:self.message requirements:self.requirements.stringValue configuration:NSURLSessionConfiguration.ephemeralSessionConfiguration
+        completion:^(NSDictionary *result, NSError *requestError) {
+            typeof(self) self = weakSelf;
+            if (!self || token != self.generation || !self.window.visible || ![self checkAccount]) return;
+            self.request = nil;
+            [self setRunning:NO];
+            if (requestError) { self.status.stringValue = requestError.localizedDescription; return; }
+            self.analysis.string = result[@"analysis"];
+            NSArray *replies = result[@"replies"];
+            for (NSUInteger i = 0; i < replies.count; i++) {
+                self.replyViews[i].string = replies[i]; self.replyCopyButtons[i].enabled = YES;
+            }
+            self.status.stringValue = @"生成完成。AI 建议可能有误，请核对后复制；不会自动发送。";
+        }];
+}
+- (void)copyReply:(NSButton *)sender {
+    if (![self checkAccount] || sender.tag < 0 || sender.tag >= (NSInteger)self.replyViews.count) return;
+    NSString *text = self.replyViews[sender.tag].string;
+    if (!text.length) return;
+    [NSPasteboard.generalPasteboard clearContents];
+    BOOL ok = [NSPasteboard.generalPasteboard setString:text forType:NSPasteboardTypeString];
+    self.status.stringValue = ok ? @"已复制。请确认目标会话后自行粘贴；剪贴板可能被其他应用读取。" : @"复制失败，请手动选择文本复制。";
+}
+- (void)windowWillClose:(NSNotification *)notification {
+    [self cancel:nil]; [self.accountTimer invalidate]; self.accountTimer = nil;
+    self.message = nil; self.isCurrentAccount = nil; self.source.string = @"";
+    self.requirements.stringValue = @""; [self clearResults];
+}
+@end
+
+void YMAIShowAnalysis(NSString *text, NSString *session, NSString *sender, BOOL (^isCurrentAccount)(void)) {
+    NSCAssert(NSThread.isMainThread, @"AI UI requires the main thread");
+    static YMAIWindowController *controller;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ controller = [[YMAIWindowController alloc] init]; });
+    [controller presentText:[text copy] session:[session copy] sender:[sender copy] account:isCurrentAccount];
+}

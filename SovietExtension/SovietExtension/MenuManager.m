@@ -13,6 +13,7 @@
 #import "RevokeSettings.h"
 #import "SidebarManager.h"
 #import "SidebarSettingsWindowController.h"
+#import "YMAISettings.h"
 #import <objc/runtime.h>
 
 #ifndef kExitChatroomNickname
@@ -159,6 +160,7 @@ static void YMProtectAssistantMenuRole(void) {
         antiUpdateMenu,
         themeMenu,
         sidebarMenu,
+        [NSMenuItem menuItemWithTitle:@"AI 设置…" action:@selector(onAISettings:) target:self keyEquivalent:@"" state:NO],
         revokeGroup,
         groupMenu,
         autoLoginMenu,
@@ -189,6 +191,11 @@ static void YMProtectAssistantMenuRole(void) {
 }
 
 #pragma mark - Menu Actions
+
+- (void)onAISettings:(NSMenuItem *)item
+{
+    YMAIShowSettings();
+}
 
 - (void)onAntiUpdate:(NSMenuItem *)item
 {

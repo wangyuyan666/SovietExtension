@@ -5,6 +5,7 @@
 #import "MessageMenuPatch.h"
 #import "MessageRepeatPatch.h"
 #import "MessageMediaActions.h"
+#import "YMAIMessageAction.h"
 #import <AppKit/AppKit.h>
 #include <algorithm>
 #include <cstring>
@@ -133,6 +134,9 @@ static void YMMessageMenuBuilder(uintptr_t model, uintptr_t menu, bool fillNames
                         auto repeat = YMMessageRepeatAction(message, session);
                         YMMessageMenuQString title("+1");
                         pending.push_back({std::make_unique<YMMessageMenuItem>(title, begin + 0x48), std::move(repeat), true});
+                        YMMessageMenuQString aiTitle("AI 分析");
+                        pending.push_back({std::make_unique<YMMessageMenuItem>(aiTitle, begin + 0x48),
+                                           YMAIMessageAction(message, session), true});
                         // 原生entry首4字节为key：0xbbf=Finder，0xbc1=另存为，0xfa3=删除。
                         // 用key去重和定位，不依赖本地化标题。
                         bool hasFinder = false, hasSave = false;
