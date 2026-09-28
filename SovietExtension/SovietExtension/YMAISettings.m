@@ -6,15 +6,14 @@
 NSString * const YMAISettingsChangedNotification = @"YMAISettingsChangedNotification";
 static NSString * const YMAIPreferencesKey = @"YMAI.Settings.SOVIET";
 static NSString * const YMAIKeyService = @"com.mustangym.SovietExtension.AI";
+static NSString * const YMAIDeepSeekBaseURL = @"https://api.deepseek.com";
 
 NSDictionary<NSString *, NSString *> *YMAILoadSettings(void) {
     NSDictionary *saved = [NSUserDefaults.standardUserDefaults dictionaryForKey:YMAIPreferencesKey] ?: @{};
     NSString *provider = [YMAIProviderIDs() containsObject:saved[@"provider"]] ? saved[@"provider"] : @"openai";
-    // Read-only, idempotent migration of the active legacy configuration. Keep archived maps
-    // and Keychain records untouched; saving explicitly commits the new protocol identifier.
-    if ([@[@"deepseek", @"zhipu"] containsObject:saved[@"provider"]]) provider = @"openai-compatible";
     NSString *model = [saved[@"model"] isKindOfClass:NSString.class] ? saved[@"model"] : @"";
-    NSString *baseURL = [saved[@"baseURL"] isKindOfClass:NSString.class] ? saved[@"baseURL"] : @"";
+    NSString *baseURL = [provider isEqualToString:@"deepseek"] ? YMAIDeepSeekBaseURL :
+        ([saved[@"baseURL"] isKindOfClass:NSString.class] ? saved[@"baseURL"] : @"");
     return @{@"provider": provider, @"model": model, @"baseURL": baseURL};
 }
 NSString *YMAICredentialScope(NSString *provider, NSString *baseURL, NSError **error) {
@@ -259,7 +258,7 @@ BOOL YMAIWriteKey(NSString *provider, NSString *baseURL, NSString *key, NSError 
     self.endpoint.maximumNumberOfLines = 4;
     [stack addArrangedSubview:self.endpoint];
     [self.endpoint.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
-    self.status = [NSTextField wrappingLabelWithString:@"密钥按接口协议和地址隔离。旧厂商配置迁移后需重新填写密钥。"];
+    self.status = [NSTextField wrappingLabelWithString:@"密钥按接口协议和地址隔离。DeepSeek 固定官方地址并关闭思考。"];
     self.status.accessibilityLabel = @"设置状态";
     [stack addArrangedSubview:self.status];
     [self.status.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
@@ -280,7 +279,7 @@ BOOL YMAIWriteKey(NSString *provider, NSString *baseURL, NSString *key, NSError 
     self.editingProvider = settings[@"provider"];
     [self.provider selectItemAtIndex:[YMAIProviderIDs() indexOfObject:self.editingProvider]];
     [self loadProvider];
-    self.status.stringValue = @"密钥按接口协议和地址隔离。旧厂商配置迁移后需重新填写密钥。";
+    self.status.stringValue = @"密钥按接口协议和地址隔离。DeepSeek 固定官方地址并关闭思考。";
 }
 - (void)managePrompts:(id)sender {
     if (!self.promptController) self.promptController = [[YMAIPromptController alloc] init];
@@ -292,7 +291,9 @@ BOOL YMAIWriteKey(NSString *provider, NSString *baseURL, NSString *key, NSError 
     id model = self.models[self.editingProvider];
     self.model.stringValue = [model isKindOfClass:NSString.class] ? model : @"";
     id base = self.baseURLs[self.editingProvider];
-    self.baseURL.stringValue = [base isKindOfClass:NSString.class] ? base : @"";
+    BOOL deepSeek = [self.editingProvider isEqualToString:@"deepseek"];
+    self.baseURL.stringValue = deepSeek ? YMAIDeepSeekBaseURL : ([base isKindOfClass:NSString.class] ? base : @"");
+    self.baseURL.editable = !deepSeek;
     self.key.stringValue = @"";
     [self updateEndpoint];
 }
@@ -300,7 +301,9 @@ BOOL YMAIWriteKey(NSString *provider, NSString *baseURL, NSString *key, NSError 
     NSError *error = nil;
     NSURL *endpoint = YMAIEndpoint(self.editingProvider, self.baseURL.stringValue, &error);
     NSString *protocol = [self.editingProvider isEqual:@"openai"] ? @"Responses" : @"Chat Completions";
-    self.endpoint.stringValue = [NSString stringWithFormat:@"协议：%@（需目标服务支持）\n%@", protocol,
+    NSString *description = [self.editingProvider isEqualToString:@"deepseek"] ? @"DeepSeek 官方 · Chat Completions · 思考关闭" :
+        [NSString stringWithFormat:@"%@（需目标服务支持）", protocol];
+    self.endpoint.stringValue = [NSString stringWithFormat:@"协议：%@\n%@", description,
         endpoint ? [@"请求地址：" stringByAppendingString:endpoint.absoluteString] : error.localizedDescription];
     self.endpoint.toolTip = endpoint.absoluteString;
 }
@@ -322,6 +325,7 @@ BOOL YMAIWriteKey(NSString *provider, NSString *baseURL, NSString *key, NSError 
     NSString *base = YMAINormalizeBaseURL(self.baseURL.stringValue, &error);
     if (!base) { self.status.stringValue = error.localizedDescription; return; }
     NSString *provider = [self.editingProvider copy];
+    if (!YMAIEndpoint(provider, base, &error)) { self.status.stringValue = error.localizedDescription; return; }
     NSString *model = [self.model.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     if (!model.length || model.length > 128) { self.status.stringValue = @"请填写有效的模型 ID（不超过 128 字符）。"; return; }
     // Only the selected provider's key is written, so a failed save has no partial multi-key transaction.

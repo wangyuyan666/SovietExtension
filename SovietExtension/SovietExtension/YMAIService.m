@@ -2,10 +2,11 @@
 #import "YMAIPromptStore.h"
 
 // Keep the original Responses identifier so unchanged OpenAI settings remain compatible.
-NSArray<NSString *> *YMAIProviderIDs(void) { return @[@"openai", @"openai-compatible"]; }
+NSArray<NSString *> *YMAIProviderIDs(void) { return @[@"openai", @"openai-compatible", @"deepseek"]; }
 NSString *YMAIProviderName(NSString *provider) {
     return @{@"openai": @"OpenAI Responses",
-             @"openai-compatible": @"OpenAI 兼容（Chat Completions）"}[provider] ?: @"未知接口协议";
+             @"openai-compatible": @"OpenAI 兼容（Chat Completions）",
+             @"deepseek": @"DeepSeek"}[provider] ?: @"未知接口协议";
 }
 NSString *YMAINormalizeBaseURL(NSString *baseURL, NSError **error) {
     NSString *value = [baseURL stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
@@ -43,6 +44,10 @@ NSURL *YMAIEndpoint(NSString *provider, NSString *baseURL, NSError **error) {
     }
     NSString *base = YMAINormalizeBaseURL(baseURL, error);
     if (!base) return nil;
+    if ([provider isEqualToString:@"deepseek"] && ![base isEqualToString:@"https://api.deepseek.com"]) {
+        if (error) *error = YMAIError(@"DeepSeek 接口仅使用官方地址 https://api.deepseek.com。");
+        return nil;
+    }
     NSString *suffix = [provider isEqual:@"openai"] ? @"/responses" : @"/chat/completions";
     return [NSURL URLWithString:[base stringByAppendingString:suffix]];
 }
@@ -84,14 +89,20 @@ NSDictionary *YMAIRequestBody(NSString *provider, NSString *model,
         @{@"selected_message": text, @"user_requirements": requirements ?: @""} options:0 error:error];
     if (!inputData) return nil;
     NSString *input = [[NSString alloc] initWithData:inputData encoding:NSUTF8StringEncoding];
+    BOOL deepSeekFlash = [model isEqualToString:@"deepseek-flash"];
     if ([provider isEqualToString:@"openai"]) {
-        return @{@"model": model, @"instructions": instruction, @"input": input,
-                 @"store": @NO, @"stream": @NO, @"max_output_tokens": @4096,
-                 @"text": @{@"format": @{@"type": @"json_object"}}};
+        NSMutableDictionary *body = [@{@"model": model, @"instructions": instruction, @"input": input,
+                                       @"store": @NO, @"stream": @NO, @"max_output_tokens": @4096,
+                                       @"text": @{@"format": @{@"type": @"json_object"}}} mutableCopy];
+        if (deepSeekFlash) body[@"reasoning"] = @{@"effort": @"none"};
+        return body;
     }
-    return @{@"model": model, @"messages": @[@{@"role": @"system", @"content": instruction},
-                                               @{@"role": @"user", @"content": input}],
-             @"stream": @NO, @"max_tokens": @4096, @"response_format": @{@"type": @"json_object"}};
+    NSMutableDictionary *body = [@{@"model": model, @"messages": @[@{@"role": @"system", @"content": instruction},
+                                                                       @{@"role": @"user", @"content": input}],
+                                   @"stream": @NO, @"max_tokens": @4096,
+                                   @"response_format": @{@"type": @"json_object"}} mutableCopy];
+    if ([provider isEqualToString:@"deepseek"] || deepSeekFlash) body[@"thinking"] = @{@"type": @"disabled"};
+    return body;
 }
 
 NSDictionary *YMAIParseResponse(NSString *provider, NSData *data, NSError **error) {
