@@ -2,12 +2,14 @@
 #import "YMAISettings.h"
 #import "YMAIService.h"
 #import "YMAIPromptStore.h"
+#import <QuartzCore/QuartzCore.h>
 
 @interface YMAIWindowController : NSWindowController <NSWindowDelegate>
 @property(nonatomic, strong) NSPopUpButton *promptSelection;
 @property(nonatomic, strong) NSTextField *destination;
 @property(nonatomic, strong) NSTextView *source;
 @property(nonatomic, strong) NSTextView *analysis;
+@property(nonatomic, strong) NSStackView *analysisSection;
 @property(nonatomic, strong) NSTextField *requirements;
 @property(nonatomic, strong) NSTextField *status;
 @property(nonatomic, strong) NSButton *generate;
@@ -29,6 +31,7 @@
 @end
 
 @implementation YMAIContentClipView
+- (BOOL)isFlipped { return YES; }
 - (void)scrollToPoint:(NSPoint)point {
     NSRect proposed = self.bounds;
     proposed.origin = point;
@@ -40,6 +43,13 @@
     if (!self.allowsVerticalScrolling) bounds.origin.y = 0;
     return bounds;
 }
+@end
+
+@interface YMAIContentStackView : NSStackView
+@end
+
+@implementation YMAIContentStackView
+- (BOOL)isFlipped { return YES; }
 @end
 
 @interface YMAIAutoSizingTextArea : NSScrollView
@@ -87,7 +97,10 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     scroll.hasHorizontalScroller = NO;
     scroll.horizontalScrollElasticity = NSScrollElasticityNone;
     scroll.verticalScrollElasticity = NSScrollElasticityNone;
-    scroll.borderType = NSBezelBorder;
+    scroll.borderType = NSNoBorder;
+    scroll.wantsLayer = YES;
+    scroll.layer.cornerRadius = 24.0;
+    scroll.layer.masksToBounds = YES;
     NSTextView *view = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 520, 48)];
     view.editable = NO;
     view.selectable = YES;
@@ -95,7 +108,7 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     view.font = [NSFont systemFontOfSize:13];
     view.textColor = NSColor.textColor;
     view.backgroundColor = NSColor.textBackgroundColor;
-    view.textContainerInset = NSMakeSize(10, 8);
+    view.textContainerInset = NSMakeSize(24, 12);
     view.autoresizingMask = NSViewWidthSizable;
     view.verticallyResizable = YES;
     view.horizontallyResizable = NO;
@@ -137,8 +150,6 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     self.destination = [NSTextField wrappingLabelWithString:@""];
     self.destination.font = [NSFont systemFontOfSize:12];
     self.destination.textColor = NSColor.secondaryLabelColor;
-    [outer addArrangedSubview:self.destination];
-    [self.destination.widthAnchor constraintEqualToAnchor:outer.widthAnchor].active = YES;
 
     NSScrollView *body = [[NSScrollView alloc] init];
     YMAIContentClipView *bodyClip = [[YMAIContentClipView alloc] init];
@@ -151,7 +162,7 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     [outer addArrangedSubview:body];
     [body.widthAnchor constraintEqualToAnchor:outer.widthAnchor].active = YES;
     [body.heightAnchor constraintGreaterThanOrEqualToConstant:280].active = YES;
-    NSStackView *content = [[NSStackView alloc] init];
+    NSStackView *content = [[YMAIContentStackView alloc] init];
     content.orientation = NSUserInterfaceLayoutOrientationVertical;
     content.alignment = NSLayoutAttributeLeading;
     content.spacing = 10;
@@ -168,8 +179,15 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     [sourceArea.widthAnchor constraintEqualToAnchor:content.widthAnchor].active = YES;
     self.source = source;
     NSScrollView *analysisArea = YMAITextArea(&analysis, @"分析结果");
-    [content addArrangedSubview:analysisArea];
-    [analysisArea.widthAnchor constraintEqualToAnchor:content.widthAnchor].active = YES;
+    self.analysisSection = [NSStackView stackViewWithViews:@[
+        [NSTextField labelWithString:@"分析结果"], analysisArea]];
+    self.analysisSection.orientation = NSUserInterfaceLayoutOrientationVertical;
+    self.analysisSection.alignment = NSLayoutAttributeLeading;
+    self.analysisSection.spacing = 10;
+    [content addArrangedSubview:self.analysisSection];
+    [self.analysisSection.widthAnchor constraintEqualToAnchor:content.widthAnchor].active = YES;
+    [analysisArea.widthAnchor constraintEqualToAnchor:self.analysisSection.widthAnchor].active = YES;
+    self.analysisSection.hidden = YES;
     self.analysis = analysis;
     NSMutableArray *views = [NSMutableArray array], *buttons = [NSMutableArray array];
     for (NSInteger i = 0; i < 3; i++) {
@@ -216,6 +234,8 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     NSStackView *actions = [NSStackView stackViewWithViews:@[settings, self.spinner, self.cancelButton, self.generate]];
     actions.spacing = 12;
     [outer addArrangedSubview:actions];
+    [outer addArrangedSubview:self.destination];
+    [self.destination.widthAnchor constraintEqualToAnchor:outer.widthAnchor].active = YES;
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(settingsChanged:)
                                               name:YMAISettingsChangedNotification object:nil];
     return self;
@@ -230,6 +250,7 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
 }
 - (void)clearResults {
     self.analysis.string = @"";
+    self.analysisSection.hidden = YES;
     for (NSTextView *view in self.replyViews) view.string = @"";
     for (NSButton *button in self.replyCopyButtons) button.enabled = NO;
 }
@@ -356,6 +377,7 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
             [self setRunning:NO];
             if (requestError) { self.status.stringValue = requestError.localizedDescription; return; }
             self.analysis.string = result[@"analysis"];
+            self.analysisSection.hidden = self.analysis.string.length == 0;
             NSArray *replies = result[@"replies"];
             for (NSUInteger i = 0; i < replies.count; i++) {
                 self.replyViews[i].string = replies[i]; self.replyCopyButtons[i].enabled = YES;
