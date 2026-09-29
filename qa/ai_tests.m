@@ -118,8 +118,8 @@ static void ServiceTests(void) {
         }
         NSDictionary *flash = YMAIRequestBody(provider, @"deepseek-flash", YMAIDefaultPrompts(), @"chat", @"测试", @"", &error);
         CHECK(flash && !error);
-        if ([provider isEqual:@"openai"]) CHECK([flash[@"reasoning"][@"effort"] isEqual:@"none"]);
-        else CHECK([flash[@"thinking"][@"type"] isEqual:@"disabled"]);
+        CHECK(!flash[@"reasoning"]);
+        CHECK([provider isEqual:@"deepseek"] ? [flash[@"thinking"][@"type"] isEqual:@"disabled"] : !flash[@"thinking"]);
     }
     NSDictionary *pro = YMAIRequestBody(@"deepseek", @"deepseek-v4-pro", YMAIDefaultPrompts(), @"chat", @"测试", @"", NULL);
     CHECK([pro[@"thinking"][@"type"] isEqual:@"disabled"]);

@@ -89,19 +89,16 @@ NSDictionary *YMAIRequestBody(NSString *provider, NSString *model,
         @{@"selected_message": text, @"user_requirements": requirements ?: @""} options:0 error:error];
     if (!inputData) return nil;
     NSString *input = [[NSString alloc] initWithData:inputData encoding:NSUTF8StringEncoding];
-    BOOL deepSeekFlash = [model isEqualToString:@"deepseek-flash"];
     if ([provider isEqualToString:@"openai"]) {
-        NSMutableDictionary *body = [@{@"model": model, @"instructions": instruction, @"input": input,
-                                       @"store": @NO, @"stream": @NO, @"max_output_tokens": @4096,
-                                       @"text": @{@"format": @{@"type": @"json_object"}}} mutableCopy];
-        if (deepSeekFlash) body[@"reasoning"] = @{@"effort": @"none"};
-        return body;
+        return @{@"model": model, @"instructions": instruction, @"input": input,
+                 @"store": @NO, @"stream": @NO, @"max_output_tokens": @4096,
+                 @"text": @{@"format": @{@"type": @"json_object"}}};
     }
     NSMutableDictionary *body = [@{@"model": model, @"messages": @[@{@"role": @"system", @"content": instruction},
                                                                        @{@"role": @"user", @"content": input}],
                                    @"stream": @NO, @"max_tokens": @4096,
                                    @"response_format": @{@"type": @"json_object"}} mutableCopy];
-    if ([provider isEqualToString:@"deepseek"] || deepSeekFlash) body[@"thinking"] = @{@"type": @"disabled"};
+    if ([provider isEqualToString:@"deepseek"]) body[@"thinking"] = @{@"type": @"disabled"};
     return body;
 }
 
