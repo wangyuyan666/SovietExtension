@@ -24,11 +24,44 @@
 @property(nonatomic) BOOL invalidAccount;
 @end
 
-static NSScrollView *YMAITextArea(NSTextView **out, NSString *label, CGFloat height) {
-    NSScrollView *scroll = [[NSScrollView alloc] init];
-    scroll.hasVerticalScroller = YES;
+@interface YMAIAutoSizingTextArea : NSScrollView
+@property(nonatomic, strong) NSLayoutConstraint *contentHeight;
+@end
+
+@implementation YMAIAutoSizingTextArea
+- (void)textStorageChanged:(NSNotification *)notification {
+    self.needsLayout = YES;
+}
+- (void)layout {
+    [super layout];
+    NSTextView *view = (NSTextView *)self.documentView;
+    CGFloat width = self.contentSize.width;
+    if (!view || width <= 0) return;
+    // Measure at the actual viewport width, including text-container padding.
+    [view setFrameSize:NSMakeSize(width, view.frame.size.height)];
+    [view.layoutManager ensureLayoutForTextContainer:view.textContainer];
+    CGFloat textHeight = NSMaxY([view.layoutManager usedRectForTextContainer:view.textContainer]);
+    if (view.layoutManager.extraLineFragmentTextContainer == view.textContainer) {
+        textHeight = MAX(textHeight, NSMaxY(view.layoutManager.extraLineFragmentRect));
+    }
+    CGFloat borderHeight = self.frame.size.height - self.contentSize.height;
+    CGFloat height = MAX(48, ceil(textHeight + 2 * view.textContainerInset.height + borderHeight));
+    if (self.contentHeight.constant != height) self.contentHeight.constant = height;
+}
+- (void)scrollWheel:(NSEvent *)event {
+    // Text areas expand fully; only the surrounding page should scroll.
+    [self.nextResponder scrollWheel:event];
+}
+- (void)dealloc {
+    [NSNotificationCenter.defaultCenter removeObserver:self];
+}
+@end
+
+static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
+    YMAIAutoSizingTextArea *scroll = [[YMAIAutoSizingTextArea alloc] init];
+    scroll.hasVerticalScroller = NO;
     scroll.borderType = NSBezelBorder;
-    NSTextView *view = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 520, height)];
+    NSTextView *view = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 520, 48)];
     view.editable = NO;
     view.selectable = YES;
     view.richText = NO;
@@ -43,7 +76,10 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label, CGFloat hei
     view.textContainer.containerSize = NSMakeSize(520, CGFLOAT_MAX);
     view.accessibilityLabel = label;
     scroll.documentView = view;
-    [scroll.heightAnchor constraintEqualToConstant:height].active = YES;
+    scroll.contentHeight = [scroll.heightAnchor constraintEqualToConstant:48];
+    scroll.contentHeight.active = YES;
+    [NSNotificationCenter.defaultCenter addObserver:scroll selector:@selector(textStorageChanged:)
+        name:NSTextStorageDidProcessEditingNotification object:view.textStorage];
     *out = view;
     return scroll;
 }
@@ -95,11 +131,11 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label, CGFloat hei
         [content.topAnchor constraintEqualToAnchor:body.contentView.topAnchor]]];
     NSTextView *source, *analysis;
     [content addArrangedSubview:[NSTextField labelWithString:@"本次上传：以下正文、补充要求及所选话术"]];
-    NSScrollView *sourceArea = YMAITextArea(&source, @"选中消息原文", 96);
+    NSScrollView *sourceArea = YMAITextArea(&source, @"选中消息原文");
     [content addArrangedSubview:sourceArea];
     [sourceArea.widthAnchor constraintEqualToAnchor:content.widthAnchor].active = YES;
     self.source = source;
-    NSScrollView *analysisArea = YMAITextArea(&analysis, @"分析结果", 88);
+    NSScrollView *analysisArea = YMAITextArea(&analysis, @"分析结果");
     [content addArrangedSubview:analysisArea];
     [analysisArea.widthAnchor constraintEqualToAnchor:content.widthAnchor].active = YES;
     self.analysis = analysis;
@@ -113,7 +149,7 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label, CGFloat hei
         row.spacing = 16;
         [content addArrangedSubview:row];
         NSTextView *reply;
-        NSScrollView *area = YMAITextArea(&reply, title.stringValue, 88);
+        NSScrollView *area = YMAITextArea(&reply, title.stringValue);
         [content addArrangedSubview:area];
         [area.widthAnchor constraintEqualToAnchor:content.widthAnchor].active = YES;
         [views addObject:reply]; [buttons addObject:copy];
