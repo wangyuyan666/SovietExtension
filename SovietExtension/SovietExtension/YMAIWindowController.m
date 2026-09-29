@@ -5,7 +5,6 @@
 
 @interface YMAIWindowController : NSWindowController <NSWindowDelegate>
 @property(nonatomic, strong) NSPopUpButton *promptSelection;
-@property(nonatomic, strong) NSTextField *identity;
 @property(nonatomic, strong) NSTextField *destination;
 @property(nonatomic, strong) NSTextView *source;
 @property(nonatomic, strong) NSTextView *analysis;
@@ -72,10 +71,6 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label, CGFloat hei
         [outer.bottomAnchor constraintEqualToAnchor:window.contentView.bottomAnchor constant:-20],
         [outer.leadingAnchor constraintEqualToAnchor:window.contentView.leadingAnchor constant:20],
         [outer.trailingAnchor constraintEqualToAnchor:window.contentView.trailingAnchor constant:-20]]];
-    self.identity = [NSTextField wrappingLabelWithString:@"分析对象"];
-    self.identity.font = [NSFont boldSystemFontOfSize:14];
-    [outer addArrangedSubview:self.identity];
-    [self.identity.widthAnchor constraintEqualToAnchor:outer.widthAnchor].active = YES;
     self.destination = [NSTextField wrappingLabelWithString:@""];
     self.destination.font = [NSFont systemFontOfSize:12];
     self.destination.textColor = NSColor.secondaryLabelColor;
@@ -104,7 +99,6 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label, CGFloat hei
     [content addArrangedSubview:sourceArea];
     [sourceArea.widthAnchor constraintEqualToAnchor:content.widthAnchor].active = YES;
     self.source = source;
-    [content addArrangedSubview:[NSTextField labelWithString:@"分析 · 上下文仅限这条消息"]];
     NSScrollView *analysisArea = YMAITextArea(&analysis, @"分析结果", 88);
     [content addArrangedSubview:analysisArea];
     [analysisArea.widthAnchor constraintEqualToAnchor:content.widthAnchor].active = YES;
@@ -213,7 +207,6 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label, CGFloat hei
     [self.promptSelection selectItemAtIndex:[YMAIPromptIDs() indexOfObject:YMAIPromptStore.sharedStore.selectedIdentifier]];
     self.source.string = text;
     self.requirements.stringValue = @"";
-    self.identity.stringValue = [NSString stringWithFormat:@"会话：%@\n发送者：%@", session, sender];
     [self setRunning:NO];
     [self showWindow:nil]; [self.window makeKeyAndOrderFront:nil];
     [self.accountTimer invalidate];
