@@ -24,6 +24,24 @@
 @property(nonatomic) BOOL invalidAccount;
 @end
 
+@interface YMAIContentClipView : NSClipView
+@property(nonatomic) BOOL allowsVerticalScrolling;
+@end
+
+@implementation YMAIContentClipView
+- (void)scrollToPoint:(NSPoint)point {
+    NSRect proposed = self.bounds;
+    proposed.origin = point;
+    [super scrollToPoint:[self constrainBoundsRect:proposed].origin];
+}
+- (NSRect)constrainBoundsRect:(NSRect)proposedBounds {
+    NSRect bounds = [super constrainBoundsRect:proposedBounds];
+    bounds.origin.x = 0;
+    if (!self.allowsVerticalScrolling) bounds.origin.y = 0;
+    return bounds;
+}
+@end
+
 @interface YMAIAutoSizingTextArea : NSScrollView
 @property(nonatomic, strong) NSLayoutConstraint *contentHeight;
 @end
@@ -39,6 +57,7 @@
     if (!view || width <= 0) return;
     // Measure at the actual viewport width, including text-container padding.
     [view setFrameSize:NSMakeSize(width, view.frame.size.height)];
+    view.textContainer.containerSize = NSMakeSize(MAX(1, width - 2 * view.textContainerInset.width), CGFLOAT_MAX);
     [view.layoutManager ensureLayoutForTextContainer:view.textContainer];
     CGFloat textHeight = NSMaxY([view.layoutManager usedRectForTextContainer:view.textContainer]);
     if (view.layoutManager.extraLineFragmentTextContainer == view.textContainer) {
@@ -47,6 +66,10 @@
     CGFloat borderHeight = self.frame.size.height - self.contentSize.height;
     CGFloat height = MAX(48, ceil(textHeight + 2 * view.textContainerInset.height + borderHeight));
     if (self.contentHeight.constant != height) self.contentHeight.constant = height;
+    // Keep the document and viewport aligned, including after long text is cleared.
+    view.minSize = NSMakeSize(0, 0);
+    [view setFrameSize:NSMakeSize(width, height - borderHeight)];
+    [self.contentView scrollToPoint:NSZeroPoint];
 }
 - (void)scrollWheel:(NSEvent *)event {
     // Text areas expand fully; only the surrounding page should scroll.
@@ -59,7 +82,11 @@
 
 static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     YMAIAutoSizingTextArea *scroll = [[YMAIAutoSizingTextArea alloc] init];
+    scroll.contentView = [[YMAIContentClipView alloc] init];
     scroll.hasVerticalScroller = NO;
+    scroll.hasHorizontalScroller = NO;
+    scroll.horizontalScrollElasticity = NSScrollElasticityNone;
+    scroll.verticalScrollElasticity = NSScrollElasticityNone;
     scroll.borderType = NSBezelBorder;
     NSTextView *view = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 520, 48)];
     view.editable = NO;
@@ -114,7 +141,12 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     [self.destination.widthAnchor constraintEqualToAnchor:outer.widthAnchor].active = YES;
 
     NSScrollView *body = [[NSScrollView alloc] init];
+    YMAIContentClipView *bodyClip = [[YMAIContentClipView alloc] init];
+    bodyClip.allowsVerticalScrolling = YES;
+    body.contentView = bodyClip;
     body.hasVerticalScroller = YES;
+    body.hasHorizontalScroller = NO;
+    body.horizontalScrollElasticity = NSScrollElasticityNone;
     body.drawsBackground = NO;
     [outer addArrangedSubview:body];
     [body.widthAnchor constraintEqualToAnchor:outer.widthAnchor].active = YES;
