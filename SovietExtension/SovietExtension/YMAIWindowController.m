@@ -23,6 +23,11 @@
 @property(nonatomic) NSUInteger generation;
 @property(nonatomic) BOOL busy;
 @property(nonatomic) BOOL invalidAccount;
+@property(nonatomic, strong) NSStackView *outer;
+@property(nonatomic, strong) NSStackView *content;
+@property(nonatomic, strong) NSScrollView *body;
+@property(nonatomic) BOOL sizingWindow;
+@property(nonatomic) BOOL windowSizeUpdatePending;
 @end
 
 @interface YMAIContentClipView : NSClipView
@@ -45,10 +50,15 @@
 @end
 
 @interface YMAIContentStackView : NSStackView
+@property(nonatomic, copy) void (^layoutChanged)(void);
 @end
 
 @implementation YMAIContentStackView
 - (BOOL)isFlipped { return YES; }
+- (void)layout {
+    [super layout];
+    if (self.layoutChanged) self.layoutChanged();
+}
 @end
 
 @interface YMAIAutoSizingTextArea : NSScrollView
@@ -57,6 +67,7 @@
 
 @implementation YMAIAutoSizingTextArea
 - (void)textStorageChanged:(NSNotification *)notification {
+    [self.contentView scrollToPoint:NSZeroPoint];
     self.needsLayout = YES;
 }
 - (void)layout {
@@ -72,27 +83,24 @@
     if (view.layoutManager.extraLineFragmentTextContainer == view.textContainer) {
         textHeight = MAX(textHeight, NSMaxY(view.layoutManager.extraLineFragmentRect));
     }
-    CGFloat borderHeight = self.frame.size.height - self.contentSize.height;
-    CGFloat height = MAX(48, ceil(textHeight + 2 * view.textContainerInset.height + borderHeight));
-    if (self.contentHeight.constant != height) self.contentHeight.constant = height;
-    // Keep the document and viewport aligned, including after long text is cleared.
+    // Keep the viewport fixed while the document grows enough to scroll all text.
+    CGFloat height = MAX(self.contentSize.height, ceil(textHeight + 2 * view.textContainerInset.height));
     view.minSize = NSMakeSize(0, 0);
-    [view setFrameSize:NSMakeSize(width, height - borderHeight)];
-    [self.contentView scrollToPoint:NSZeroPoint];
-}
-- (void)scrollWheel:(NSEvent *)event {
-    // Text areas expand fully; only the surrounding page should scroll.
-    [self.nextResponder scrollWheel:event];
+    [view setFrameSize:NSMakeSize(width, height)];
+    [self.contentView scrollToPoint:self.contentView.bounds.origin];
 }
 - (void)dealloc {
     [NSNotificationCenter.defaultCenter removeObserver:self];
 }
 @end
 
-static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
+static NSScrollView *YMAITextArea(NSTextView **out, NSString *label, CGFloat height) {
     YMAIAutoSizingTextArea *scroll = [[YMAIAutoSizingTextArea alloc] init];
-    scroll.contentView = [[YMAIContentClipView alloc] init];
-    scroll.hasVerticalScroller = NO;
+    YMAIContentClipView *clip = [[YMAIContentClipView alloc] init];
+    clip.allowsVerticalScrolling = YES;
+    scroll.contentView = clip;
+    scroll.hasVerticalScroller = YES;
+    scroll.scrollerStyle = NSScrollerStyleOverlay;
     scroll.hasHorizontalScroller = NO;
     scroll.horizontalScrollElasticity = NSScrollElasticityNone;
     scroll.verticalScrollElasticity = NSScrollElasticityNone;
@@ -115,7 +123,7 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     view.textContainer.containerSize = NSMakeSize(520, CGFLOAT_MAX);
     view.accessibilityLabel = label;
     scroll.documentView = view;
-    scroll.contentHeight = [scroll.heightAnchor constraintEqualToConstant:48];
+    scroll.contentHeight = [scroll.heightAnchor constraintEqualToConstant:height];
     scroll.contentHeight.active = YES;
     [NSNotificationCenter.defaultCenter addObserver:scroll selector:@selector(textStorageChanged:)
         name:NSTextStorageDidProcessEditingNotification object:view.textStorage];
@@ -132,10 +140,13 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     if (!self) return nil;
     window.title = @"AI 分析";
     window.releasedWhenClosed = NO;
-    window.minSize = NSMakeSize(520, 620);
+    window.contentMinSize = NSMakeSize(520, 240);
     window.delegate = self;
     [window center];
-    NSStackView *outer = [[NSStackView alloc] init];
+    YMAIContentStackView *outer = [[YMAIContentStackView alloc] init];
+    self.outer = outer;
+    __weak typeof(self) weakSelf = self;
+    outer.layoutChanged = ^{ [weakSelf scheduleWindowSizeUpdate]; };
     outer.orientation = NSUserInterfaceLayoutOrientationVertical;
     outer.alignment = NSLayoutAttributeLeading;
     outer.spacing = 12;
@@ -151,6 +162,7 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     self.destination.textColor = NSColor.secondaryLabelColor;
 
     NSScrollView *body = [[NSScrollView alloc] init];
+    self.body = body;
     YMAIContentClipView *bodyClip = [[YMAIContentClipView alloc] init];
     bodyClip.allowsVerticalScrolling = YES;
     body.contentView = bodyClip;
@@ -161,7 +173,9 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     [outer addArrangedSubview:body];
     [body.widthAnchor constraintEqualToAnchor:outer.widthAnchor].active = YES;
     [body.heightAnchor constraintGreaterThanOrEqualToConstant:48].active = YES;
-    NSStackView *content = [[YMAIContentStackView alloc] init];
+    YMAIContentStackView *content = [[YMAIContentStackView alloc] init];
+    self.content = content;
+    content.layoutChanged = ^{ [weakSelf scheduleWindowSizeUpdate]; };
     content.orientation = NSUserInterfaceLayoutOrientationVertical;
     content.alignment = NSLayoutAttributeLeading;
     content.spacing = 10;
@@ -177,11 +191,11 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     bodyContentHeight.active = YES;
     NSTextView *source, *analysis;
     [content addArrangedSubview:[NSTextField labelWithString:@"本次上传：以下正文及所选话术"]];
-    NSScrollView *sourceArea = YMAITextArea(&source, @"选中消息原文");
+    NSScrollView *sourceArea = YMAITextArea(&source, @"选中消息原文", 80);
     [content addArrangedSubview:sourceArea];
     [sourceArea.widthAnchor constraintEqualToAnchor:content.widthAnchor].active = YES;
     self.source = source;
-    NSScrollView *analysisArea = YMAITextArea(&analysis, @"分析结果");
+    NSScrollView *analysisArea = YMAITextArea(&analysis, @"分析结果", 120);
     self.analysisSection = [NSStackView stackViewWithViews:@[
         [NSTextField labelWithString:@"分析结果"], analysisArea]];
     self.analysisSection.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -190,7 +204,6 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     [content addArrangedSubview:self.analysisSection];
     [self.analysisSection.widthAnchor constraintEqualToAnchor:content.widthAnchor].active = YES;
     [analysisArea.widthAnchor constraintEqualToAnchor:self.analysisSection.widthAnchor].active = YES;
-    self.analysisSection.hidden = YES;
     self.analysis = analysis;
     NSMutableArray *views = [NSMutableArray array], *buttons = [NSMutableArray array];
     for (NSInteger i = 0; i < 3; i++) {
@@ -202,7 +215,7 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
         row.spacing = 16;
         [content addArrangedSubview:row];
         NSTextView *reply;
-        NSScrollView *area = YMAITextArea(&reply, title.stringValue);
+        NSScrollView *area = YMAITextArea(&reply, title.stringValue, 60);
         [content addArrangedSubview:area];
         [area.widthAnchor constraintEqualToAnchor:content.widthAnchor].active = YES;
         [views addObject:reply]; [buttons addObject:copy];
@@ -235,7 +248,55 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     [self.destination.widthAnchor constraintEqualToAnchor:outer.widthAnchor].active = YES;
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(settingsChanged:)
                                               name:YMAISettingsChangedNotification object:nil];
+    [self scheduleWindowSizeUpdate];
     return self;
+}
+- (void)scheduleWindowSizeUpdate {
+    if (self.sizingWindow || self.windowSizeUpdatePending) return;
+    self.windowSizeUpdatePending = YES;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        typeof(self) self = weakSelf;
+        if (!self) return;
+        self.windowSizeUpdatePending = NO;
+        [self fitWindowToContent];
+    });
+}
+- (void)fitWindowToContent {
+    if (self.sizingWindow || self.window.inLiveResize) return;
+    self.sizingWindow = YES;
+    [self.window.contentView layoutSubtreeIfNeeded];
+    CGFloat height = 40;
+    NSUInteger count = 0;
+    for (NSView *view in self.outer.arrangedSubviews) {
+        if (view.hidden) continue;
+        height += view == self.body ? self.content.fittingSize.height : view.frame.size.height;
+        count++;
+    }
+    if (count > 1) height += (count - 1) * self.outer.spacing;
+    NSScreen *screen = self.window.screen ?: NSScreen.mainScreen;
+    NSRect frame = self.window.frame;
+    CGFloat chromeHeight = frame.size.height - self.window.contentView.frame.size.height;
+    CGFloat maximumHeight = screen ? screen.visibleFrame.size.height - chromeHeight : height;
+    height = ceil(MIN(MAX(240, height), maximumHeight));
+    if (fabs(self.window.contentView.frame.size.height - height) > 0.5) {
+        CGFloat frameHeight = height + chromeHeight;
+        frame.origin.y = NSMaxY(frame) - frameHeight;
+        frame.size.height = frameHeight;
+        if (screen) frame.origin.y = MAX(NSMinY(screen.visibleFrame), MIN(frame.origin.y, NSMaxY(screen.visibleFrame) - frameHeight));
+        [self.window setFrame:frame display:YES];
+        [self.window.contentView layoutSubtreeIfNeeded];
+    }
+    self.sizingWindow = NO;
+}
+- (void)windowDidResize:(NSNotification *)notification {
+    [self scheduleWindowSizeUpdate];
+}
+- (void)windowDidEndLiveResize:(NSNotification *)notification {
+    [self scheduleWindowSizeUpdate];
+}
+- (void)windowDidChangeScreen:(NSNotification *)notification {
+    [self scheduleWindowSizeUpdate];
 }
 - (void)setRunning:(BOOL)running {
     self.busy = running;
@@ -246,7 +307,6 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
 }
 - (void)clearResults {
     self.analysis.string = @"";
-    self.analysisSection.hidden = YES;
     for (NSTextView *view in self.replyViews) view.string = @"";
     for (NSButton *button in self.replyCopyButtons) button.enabled = NO;
 }
@@ -277,6 +337,7 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     [self.promptSelection selectItemAtIndex:[YMAIPromptIDs() indexOfObject:YMAIPromptStore.sharedStore.selectedIdentifier]];
     self.source.string = text;
     [self setRunning:NO];
+    [self fitWindowToContent];
     [self showWindow:nil]; [self.window makeKeyAndOrderFront:nil];
     [self.accountTimer invalidate];
     __weak typeof(self) weakSelf = self;
@@ -357,7 +418,6 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
             [self setRunning:NO];
             if (requestError) { self.status.stringValue = requestError.localizedDescription; return; }
             self.analysis.string = result[@"analysis"];
-            self.analysisSection.hidden = self.analysis.string.length == 0;
             NSArray *replies = result[@"replies"];
             for (NSUInteger i = 0; i < replies.count; i++) {
                 self.replyViews[i].string = replies[i]; self.replyCopyButtons[i].enabled = YES;
