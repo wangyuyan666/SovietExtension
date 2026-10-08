@@ -304,6 +304,28 @@ sh /Users/mustangym/SovietExtension/SovietExtension/Rely/uninstall.sh
 
 ---
 
+## Release / Tag 自动发布
+
+仓库通过 `.github/workflows/release.yml` 在推送版本 Tag 时构建并发布 GitHub Release，接受 `1.4.4` 或 `v1.4.4` 形式的三段数字版本；其他 Tag 不用于发布。以下版本号仅为示例，发布前应确认尚未使用。
+
+1. 将发布工作流和待发布源码提交、推送到本仓库，确认目标提交正确。Tag 必须指向包含工作流的提交。
+2. 检查菜单中的插件显示版本、发布内容及微信适配范围。工作流只将 Tag 版本写入构建产物的 `CFBundleShortVersionString`，不会自动修改源码中的菜单版本或扩大兼容范围。
+3. 创建并推送 Tag（推送会触发公开发布）：
+
+   ```bash
+   git tag -a v1.4.4 -m "Release v1.4.4"
+   git push origin v1.4.4
+   ```
+
+4. 在 GitHub Actions 查看 `Release plugin`。工作流使用 `macos-15-arm64` 和 Xcode 26.3，仅构建 `arm64` Release，禁用构建签名，并设置 `SOVEXT_SKIP_INSTALL=1`，不执行微信安装步骤。不覆盖工程的 deployment target。
+5. 构建成功并通过架构、版本、解压包内容及 SHA-256 校验后，自动创建 Release，上传 `SovietExtension-<tag>-arm64.zip` 和对应 `.zip.sha256`。安装包使用本次构建的 framework，不使用仓库中旧的 `Rely/Plugin/` 产物，也不会回写它。
+
+下载 ZIP 和校验文件后，可在同一目录执行 `shasum -a 256 -c SovietExtension-<tag>-arm64.zip.sha256`（将 `<tag>` 替换为实际版本）。解压后的目录包含 `README.md`、`LICENSE` 和完整 `Rely/` 安装目录；进入解压目录后执行 `bash Rely/install.sh`。**安装会修改并重新签名微信，请先阅读安装说明及支持版本列表。** Release 构建通过不代表已完成微信宿主运行验证；AI 功能范围和隐私限制仍以上文为准。
+
+发布任务需要仓库允许 GitHub Actions，并使用内置 `GITHUB_TOKEN` 的 `contents: write` 权限，不需要另存个人访问令牌。已有 Release 不会被重跑覆盖；若发布失败，先核对 Actions 日志和是否已创建部分 Release，不要删除或移动已发布 Tag。
+
+---
+
 ## Notes / 说明
 
 * 本项目仅用于学习、研究与个人折腾。

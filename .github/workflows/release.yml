@@ -1,0 +1,110 @@
+name: Release plugin
+
+on:
+  push:
+    tags:
+      - '[0-9]*.[0-9]*.[0-9]*'
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15-arm64
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      SOVEXT_SKIP_INSTALL: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            printf 'Unsupported release tag: %s\n' "$RELEASE_TAG" >&2
+            exit 1
+          }
+          printf 'RELEASE_VERSION=%s\n' "${RELEASE_TAG#v}" >> "$GITHUB_ENV"
+          printf 'PACKAGE_NAME=SovietExtension-%s-arm64\n' "$RELEASE_TAG" >> "$GITHUB_ENV"
+
+      - name: Build Release framework without installing
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          bash -n SovietExtension/Rely/install.sh
+          bash -n SovietExtension/Rely/uninstall.sh
+          xcodebuild -project SovietExtension/SovietExtension.xcodeproj \
+            -scheme SovietExtension -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            ARCHS=arm64 CODE_SIGNING_ALLOWED=NO SOVEXT_SKIP_INSTALL=1 \
+            MARKETING_VERSION="$RELEASE_VERSION" build
+
+      - name: Package and verify release
+        run: |
+          set -euo pipefail
+          framework="$RUNNER_TEMP/DerivedData/Build/Products/Release/SovietExtension.framework"
+          test "$(lipo -archs "$framework/SovietExtension")" = arm64
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$framework/Resources/Info.plist")" = "$RELEASE_VERSION"
+          package="$RUNNER_TEMP/package/$PACKAGE_NAME"
+          mkdir -p "$package/Rely/Plugin" dist
+          ditto "$framework" "$package/Rely/Plugin/SovietExtension.framework"
+          for item in install.sh uninstall.sh insert_dylib supported_versions.txt; do
+            cp -p "SovietExtension/Rely/$item" "$package/Rely/$item"
+          done
+          cp README.md LICENSE "$package/"
+          chmod +x "$package/Rely/install.sh" "$package/Rely/uninstall.sh" "$package/Rely/insert_dylib"
+          ditto -c -k --sequesterRsrc --keepParent "$package" "dist/$PACKAGE_NAME.zip"
+          ditto -x -k "dist/$PACKAGE_NAME.zip" "$RUNNER_TEMP/verify-package"
+          verified="$RUNNER_TEMP/verify-package/$PACKAGE_NAME"
+          test "$(lipo -archs "$verified/Rely/Plugin/SovietExtension.framework/SovietExtension")" = arm64
+          cmp "$framework/SovietExtension" "$verified/Rely/Plugin/SovietExtension.framework/SovietExtension"
+          for item in install.sh uninstall.sh insert_dylib supported_versions.txt; do
+            cmp "SovietExtension/Rely/$item" "$verified/Rely/$item"
+          done
+          test -x "$verified/Rely/insert_dylib"
+          (cd dist && shasum -a 256 "$PACKAGE_NAME.zip" > "$PACKAGE_NAME.zip.sha256")
+          (cd dist && shasum -a 256 -c "$PACKAGE_NAME.zip.sha256")
+
+      - name: Upload verified release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files
+          path: dist
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum -c -- *.sha256)
+          # Never overwrite an existing release or its assets on a rerun.
+          gh release create "$RELEASE_TAG" dist/* \
+            --verify-tag --title "SovietExtension $RELEASE_TAG" --generate-notes \
+            --notes 'Apple Silicon (arm64) Release build. Extract the ZIP, then run bash Rely/install.sh from the extracted directory. Installation modifies and re-signs WeChat; review README.md and supported_versions.txt first. No Intel support. CI build success does not verify host runtime compatibility. See README.md for AI feature scope and privacy requirements.'
