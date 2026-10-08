@@ -99,7 +99,7 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     scroll.verticalScrollElasticity = NSScrollElasticityNone;
     scroll.borderType = NSNoBorder;
     scroll.wantsLayer = YES;
-    scroll.layer.cornerRadius = 24.0;
+    scroll.layer.cornerRadius = 12.0;
     scroll.layer.masksToBounds = YES;
     NSTextView *view = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 520, 48)];
     view.editable = NO;
@@ -144,7 +144,7 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     [window.contentView addSubview:outer];
     [NSLayoutConstraint activateConstraints:@[
         [outer.topAnchor constraintEqualToAnchor:window.contentView.topAnchor constant:20],
-        [outer.bottomAnchor constraintEqualToAnchor:window.contentView.bottomAnchor constant:-20],
+        [outer.bottomAnchor constraintLessThanOrEqualToAnchor:window.contentView.bottomAnchor constant:-20],
         [outer.leadingAnchor constraintEqualToAnchor:window.contentView.leadingAnchor constant:20],
         [outer.trailingAnchor constraintEqualToAnchor:window.contentView.trailingAnchor constant:-20]]];
     self.destination = [NSTextField wrappingLabelWithString:@""];
@@ -161,7 +161,7 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
     body.drawsBackground = NO;
     [outer addArrangedSubview:body];
     [body.widthAnchor constraintEqualToAnchor:outer.widthAnchor].active = YES;
-    [body.heightAnchor constraintGreaterThanOrEqualToConstant:280].active = YES;
+    [body.heightAnchor constraintGreaterThanOrEqualToConstant:48].active = YES;
     NSStackView *content = [[YMAIContentStackView alloc] init];
     content.orientation = NSUserInterfaceLayoutOrientationVertical;
     content.alignment = NSLayoutAttributeLeading;
@@ -172,6 +172,10 @@ static NSScrollView *YMAITextArea(NSTextView **out, NSString *label) {
         [content.widthAnchor constraintEqualToAnchor:body.contentView.widthAnchor],
         [content.leadingAnchor constraintEqualToAnchor:body.contentView.leadingAnchor],
         [content.topAnchor constraintEqualToAnchor:body.contentView.topAnchor]]];
+    // Fit short content without a trailing gap; allow scrolling when the page is taller than the window.
+    NSLayoutConstraint *bodyContentHeight = [body.heightAnchor constraintEqualToAnchor:content.heightAnchor];
+    bodyContentHeight.priority = NSLayoutPriorityDefaultHigh;
+    bodyContentHeight.active = YES;
     NSTextView *source, *analysis;
     [content addArrangedSubview:[NSTextField labelWithString:@"本次上传：以下正文、补充要求及所选话术"]];
     NSScrollView *sourceArea = YMAITextArea(&source, @"选中消息原文");
