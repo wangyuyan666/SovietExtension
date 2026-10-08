@@ -2,6 +2,7 @@
 #import "YMAIService.h"
 #import "YMAIPromptStore.h"
 #import <Security/Security.h>
+#import <QuartzCore/QuartzCore.h>
 
 NSString * const YMAISettingsChangedNotification = @"YMAISettingsChangedNotification";
 static NSString * const YMAIPreferencesKey = @"YMAI.Settings.SOVIET";
@@ -68,6 +69,22 @@ BOOL YMAIWriteKey(NSString *provider, NSString *baseURL, NSString *key, NSError 
     return status == errSecSuccess;
 }
 
+@interface YMAIPromptClipView : NSClipView
+@end
+
+@implementation YMAIPromptClipView
+- (void)scrollToPoint:(NSPoint)point {
+    NSRect proposed = self.bounds;
+    proposed.origin = point;
+    [super scrollToPoint:[self constrainBoundsRect:proposed].origin];
+}
+- (NSRect)constrainBoundsRect:(NSRect)proposedBounds {
+    NSRect bounds = [super constrainBoundsRect:proposedBounds];
+    bounds.origin.x = 0;
+    return bounds;
+}
+@end
+
 // Independent draft: switching templates preserves edits; closing without saving discards them.
 @interface YMAIPromptController : NSWindowController <NSWindowDelegate>
 @property(nonatomic, strong) NSPopUpButton *selection;
@@ -121,8 +138,14 @@ BOOL YMAIWriteKey(NSString *provider, NSString *baseURL, NSString *key, NSError 
         [stack addArrangedSubview:row];
     }
     NSScrollView *scroll = [[NSScrollView alloc] init];
+    scroll.contentView = [[YMAIPromptClipView alloc] init];
     scroll.hasVerticalScroller = YES;
-    scroll.borderType = NSBezelBorder;
+    scroll.hasHorizontalScroller = NO;
+    scroll.horizontalScrollElasticity = NSScrollElasticityNone;
+    scroll.borderType = NSNoBorder;
+    scroll.wantsLayer = YES;
+    scroll.layer.cornerRadius = 12.0;
+    scroll.layer.masksToBounds = YES;
     self.editor = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 620, 300)];
     self.editor.richText = NO;
     self.editor.font = [NSFont systemFontOfSize:13];
