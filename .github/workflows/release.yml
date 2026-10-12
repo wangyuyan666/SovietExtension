@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-15-arm64
+    runs-on: macos-15
     timeout-minutes: 30
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
@@ -24,6 +24,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+
+      - name: Validate build environment
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == arm64 ]] || {
+            printf 'Release builds require an arm64 runner.\n' >&2
+            exit 1
+          }
+          [[ -d "$DEVELOPER_DIR" ]] || {
+            printf 'Missing Xcode developer directory: %s\n' "$DEVELOPER_DIR" >&2
+            exit 1
+          }
+          xcode_version="$(xcodebuild -version)"
+          printf '%s\n' "$xcode_version"
+          [[ "$xcode_version" == "Xcode 26.3"$'\n'* ]] || {
+            printf 'Release builds require Xcode 26.3.\n' >&2
+            exit 1
+          }
 
       - name: Validate release tag
         env:
@@ -40,7 +58,6 @@ jobs:
       - name: Build Release framework without installing
         run: |
           set -euo pipefail
-          xcodebuild -version
           bash -n SovietExtension/Rely/install.sh
           bash -n SovietExtension/Rely/uninstall.sh
           xcodebuild -project SovietExtension/SovietExtension.xcodeproj \
